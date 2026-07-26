@@ -108,6 +108,102 @@ class BuildMcpAddArgs(unittest.TestCase):
         self.assertIn("KEY=val", args)
 
 
+class ParseFrontmatter(unittest.TestCase):
+    def test_flat_keys(self):
+        text = "---\ndescription: does things\nmodel: anthropic/claude-opus-4-8\n---\nBody text.\n"
+        fm, body = m.parse_frontmatter(text)
+        self.assertEqual(fm["description"], "does things")
+        self.assertEqual(fm["model"], "anthropic/claude-opus-4-8")
+        self.assertEqual(body, "Body text.\n")
+
+    def test_nested_tools_map_and_booleans(self):
+        text = "---\ndescription: x\ntools:\n  write: true\n  edit: false\n---\nBody\n"
+        fm, body = m.parse_frontmatter(text)
+        self.assertEqual(fm["tools"], {"write": True, "edit": False})
+        self.assertEqual(body, "Body\n")
+
+    def test_quoted_scalar(self):
+        text = '---\ndescription: "hello: world"\n---\nBody\n'
+        fm, _ = m.parse_frontmatter(text)
+        self.assertEqual(fm["description"], "hello: world")
+
+    def test_no_frontmatter_returns_whole_text_as_body(self):
+        text = "Just a plain file, no frontmatter.\n"
+        fm, body = m.parse_frontmatter(text)
+        self.assertEqual(fm, {})
+        self.assertEqual(body, text)
+
+
+class FindGlobalAgentDefinitions(unittest.TestCase):
+    def test_real_file_takes_precedence_over_oh_my_openagent_stub(self):
+        with tempfile.TemporaryDirectory() as agent_dir:
+            with open(os.path.join(agent_dir, "sisyphus.md"), "w") as f:
+                f.write("---\ndescription: My real custom sisyphus\nmodel: anthropic/claude-opus-4-8\n"
+                        "tools:\n  write: true\n---\nYou are Sisyphus, a real prompt I wrote.\n")
+
+            oh_my_cfg = {"agents": {"sisyphus": {"model": "anthropic/claude-opus-4-8"},
+                                     "explore": {"model": "anthropic/claude-haiku-4-5"}}}
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump(oh_my_cfg, f)
+                oh_my_path = f.name
+
+            try:
+                with mock.patch.object(m, "GLOBAL_AGENT_DIR", agent_dir), \
+                     mock.patch.object(m, "OH_MY_OPENAGENT_CONFIG_PATH", oh_my_path):
+                    defs = m.find_global_agent_definitions()
+            finally:
+                os.unlink(oh_my_path)
+
+            self.assertEqual(defs["sisyphus"]["kind"], "file")
+            self.assertIn("real prompt I wrote", defs["sisyphus"]["body"])
+            self.assertEqual(defs["explore"]["kind"], "stub")
+            self.assertEqual(defs["explore"]["model"], "claude-haiku-4-5")
+
+    def test_build_claude_agent_frontmatter_lists_enabled_tools(self):
+        fm = {"description": "desc", "model": "anthropic/claude-opus-4-8",
+              "tools": {"write": True, "edit": False, "bash": True}}
+        lines = m.build_claude_agent_frontmatter("myagent", fm)
+        joined = "\n".join(lines)
+        self.assertIn("name: myagent", joined)
+        self.assertIn("model: claude-opus-4-8", joined)
+        self.assertIn("write", joined)
+        self.assertIn("bash", joined)
+        self.assertNotIn("tools: edit", joined)
+
+
+class ImportGlobalAgentsWizard(unittest.TestCase):
+    def test_full_definition_written_verbatim_at_global_scope(self):
+        agent_defs = {
+            "sisyphus": {"kind": "file", "display_name": "sisyphus",
+                         "frontmatter": {"description": "real one", "model": "anthropic/claude-opus-4-8"},
+                         "body": "You are Sisyphus.\n"},
+        }
+        with tempfile.TemporaryDirectory() as home:
+            target = os.path.join(home, ".claude", "agents")
+            buf = io.StringIO()
+            # answers: import agents? yes / scope? global / import 'sisyphus'? yes
+            with mock.patch("builtins.input", side_effect=["y", "global", "y"]), \
+                 mock.patch("os.path.expanduser", side_effect=lambda p: p.replace("~", home)), \
+                 redirect_stdout(buf):
+                m.import_global_agents_wizard(agent_defs)
+            path = os.path.join(target, "sisyphus.md")
+            self.assertTrue(os.path.exists(path))
+            with open(path) as f:
+                content = f.read()
+            self.assertIn("You are Sisyphus.", content)
+            self.assertIn("model: claude-opus-4-8", content)
+
+    def test_stub_written_at_chosen_local_directory(self):
+        agent_defs = {"explore": {"kind": "stub", "display_name": "explore", "model": "claude-haiku-4-5"}}
+        with tempfile.TemporaryDirectory() as project_dir:
+            buf = io.StringIO()
+            # answers: import agents? yes / scope? local / target dir? <project_dir> / import 'explore'? yes
+            with mock.patch("builtins.input", side_effect=["y", "local", project_dir, "y"]), redirect_stdout(buf):
+                m.import_global_agents_wizard(agent_defs)
+            path = os.path.join(project_dir, ".claude", "agents", "explore.md")
+            self.assertTrue(os.path.exists(path))
+
+
 class WriteAgentStub(unittest.TestCase):
     def test_writes_frontmatter_and_body(self):
         with tempfile.TemporaryDirectory() as d:
