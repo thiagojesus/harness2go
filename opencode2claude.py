@@ -55,12 +55,23 @@ Notes:
 import argparse
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
+
+from harness_common import (
+    load_jsonc,
+    mask_secret,
+    parse_frontmatter,
+    prompt_choice,
+    prompt_text,
+    prompt_yes_no,
+    slugify_cwd,
+    slugify_name,
+    strip_jsonc_comments,  # noqa: F401 (re-exported for backward-compat imports/tests)
+)
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 DEFAULT_CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
@@ -77,10 +88,6 @@ AGENT_SCOPES = ("local", "global")
 def iso_ms(ms):
     dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-def slugify_cwd(cwd):
-    return "".join("-" if c in ("/", ".") else c for c in cwd)
 
 
 def detect_git_branch(directory):
@@ -186,58 +193,6 @@ def build_usage(tokens, cost):
     }
 
 
-def strip_jsonc_comments(text):
-    """Remove // and /* */ comments from JSONC, respecting string literals
-    (so URLs like "https://..." don't get truncated by a naive // strip)."""
-    out = []
-    i, n = 0, len(text)
-    in_string = False
-    escape = False
-    while i < n:
-        c = text[i]
-        if in_string:
-            out.append(c)
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == '"':
-                in_string = False
-            i += 1
-            continue
-        if c == '"':
-            in_string = True
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
-def load_jsonc(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path) as f:
-        raw = f.read()
-    cleaned = strip_jsonc_comments(raw)
-    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)  # trailing commas
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return {}
-
-
 def find_project_config_paths(directory):
     """Walk from `directory` up to $HOME looking for opencode.json(c)."""
     home = os.path.expanduser("~")
@@ -327,49 +282,6 @@ def find_session_agents(messages, parts_by_message):
 GLOBAL_AGENT_DIR = os.path.expanduser("~/.config/opencode/agent")
 
 
-def parse_scalar(v):
-    if v.lower() in ("true", "false"):
-        return v.lower() == "true"
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-        return v[1:-1]
-    return v
-
-
-def parse_frontmatter(text):
-    """Minimal YAML-ish frontmatter parser: flat `key: value` pairs plus one
-    level of nested `key:\\n  sub: value` maps — enough for typical OpenCode
-    agent markdown files, without pulling in a YAML dependency."""
-    if not text.startswith("---"):
-        return {}, text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return {}, text
-    fm_text = text[3:end].strip("\n")
-    body = text[end + 4:].lstrip("\n")
-
-    data = {}
-    current_key = None
-    for line in fm_text.splitlines():
-        if not line.strip():
-            continue
-        if line[:1] in (" ", "\t") and current_key is not None:
-            k, sep, v = line.strip().partition(":")
-            if sep and isinstance(data.get(current_key), dict):
-                data[current_key][k.strip()] = parse_scalar(v.strip())
-            continue
-        k, sep, v = line.partition(":")
-        if not sep:
-            continue
-        k, v = k.strip(), v.strip()
-        if v == "":
-            data[k] = {}
-            current_key = k
-        else:
-            data[k] = parse_scalar(v)
-            current_key = None
-    return data, body
-
-
 def find_global_agent_files():
     """Real, full-fidelity agent definitions the user authored themselves as
     ~/.config/opencode/agent/*.md — unlike plugin-bundled agents, these have
@@ -384,7 +296,7 @@ def find_global_agent_files():
         with open(path) as f:
             text = f.read()
         frontmatter, body = parse_frontmatter(text)
-        slug = re.sub(r"[^a-z0-9]+", "-", os.path.splitext(fname)[0].lower()).strip("-")
+        slug = slugify_name(os.path.splitext(fname)[0])
         defs[slug] = {
             "kind": "file",
             "display_name": frontmatter.get("name", os.path.splitext(fname)[0]),
@@ -408,7 +320,7 @@ def find_global_agent_definitions():
         except (OSError, json.JSONDecodeError):
             cfg = {}
         for name, spec in (cfg.get("agents") or {}).items():
-            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+            slug = slugify_name(name)
             if slug in defs:
                 continue
             model = spec.get("model")
@@ -444,12 +356,6 @@ def write_full_agent_file(target_dir, slug, oc_frontmatter, body):
     return path
 
 
-def mask_secret(value):
-    if not isinstance(value, str) or len(value) <= 8:
-        return "***"
-    return value[:4] + "…" + value[-2:]
-
-
 def build_mcp_add_args(name, spec, scope, mask=False):
     """Build the argv for `claude mcp add` from an OpenCode mcp config entry.
     With mask=True, secret-bearing values (headers/env) are redacted, for
@@ -483,7 +389,7 @@ def agents_target_dir(scope, directory):
 
 def write_agent_stub(target_dir, agent_name, description, model=None):
     os.makedirs(target_dir, exist_ok=True)
-    slug = re.sub(r"[^a-z0-9]+", "-", agent_name.lower()).strip("-") or "agent"
+    slug = slugify_name(agent_name)
     path = os.path.join(target_dir, f"{slug}.md")
     frontmatter = [f"name: {slug}", f"description: {description}"]
     if model:
@@ -499,41 +405,6 @@ def write_agent_stub(target_dir, agent_name, description, model=None):
     with open(path, "w") as f:
         f.write("---\n" + "\n".join(frontmatter) + "\n---\n\n" + body)
     return path
-
-
-def prompt_yes_no(question, default=False):
-    suffix = " [Y/n] " if default else " [y/N] "
-    try:
-        ans = input(question + suffix).strip().lower()
-    except EOFError:
-        return default
-    if not ans:
-        return default
-    return ans in ("y", "yes")
-
-
-def prompt_choice(question, choices, default=None):
-    choice_str = "/".join(choices)
-    default_hint = f" [{default}]" if default else ""
-    while True:
-        try:
-            ans = input(f"{question} ({choice_str}){default_hint}: ").strip().lower()
-        except EOFError:
-            return default
-        if not ans and default:
-            return default
-        if ans in choices:
-            return ans
-        print(f"  Please answer one of: {choice_str}")
-
-
-def prompt_text(question, default=""):
-    suffix = f" [{default}]" if default else ""
-    try:
-        ans = input(f"{question}{suffix}: ").strip()
-    except EOFError:
-        return default
-    return ans or default
 
 
 def import_mcp_wizard(servers, run=subprocess.run, default_scope="local"):
