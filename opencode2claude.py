@@ -29,11 +29,21 @@ Notes:
   - Tool calls/results are paired: each OpenCode `tool` part becomes a
     `tool_use` block immediately followed by a `user` role `tool_result`
     line, mirroring how Claude Code itself records tool round-trips.
+  - Optionally, after converting a session, an interactive wizard offers to
+    import the MCP servers configured for that OpenCode project (via the
+    real `claude mcp add` CLI, at local/project/user scope) and to generate
+    Claude Code subagent stubs for the agents referenced in the session (at
+    project or user scope). Agent stubs are honest placeholders: OpenCode's
+    actual system-prompt text for built-in/plugin agents isn't recoverable
+    from the session or stored locally in editable form, so the stub only
+    carries what's genuinely observable (name, usage count, task
+    descriptions, best-effort model mapping) and says so in its body.
 """
 
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -43,6 +53,13 @@ from datetime import datetime, timezone
 DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 DEFAULT_CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
 CLAUDE_VERSION_FALLBACK = "2.1.220"
+OPENCODE_GLOBAL_CONFIG_PATHS = [
+    os.path.expanduser("~/.config/opencode/opencode.jsonc"),
+    os.path.expanduser("~/.config/opencode/opencode.json"),
+]
+OH_MY_OPENAGENT_CONFIG_PATH = os.path.expanduser("~/.config/opencode/oh-my-openagent.json")
+MCP_SCOPES = ("local", "project", "user")
+AGENT_SCOPES = ("local", "global")
 
 
 def iso_ms(ms):
@@ -155,6 +172,255 @@ def build_usage(tokens, cost):
         "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
         "service_tier": None,
     }
+
+
+def strip_jsonc_comments(text):
+    """Remove // and /* */ comments from JSONC, respecting string literals
+    (so URLs like "https://..." don't get truncated by a naive // strip)."""
+    out = []
+    i, n = 0, len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def load_jsonc(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        raw = f.read()
+    cleaned = strip_jsonc_comments(raw)
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)  # trailing commas
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {}
+
+
+def find_project_config_paths(directory):
+    """Walk from `directory` up to $HOME looking for opencode.json(c)."""
+    home = os.path.expanduser("~")
+    paths = []
+    cur = os.path.abspath(directory)
+    while True:
+        for name in ("opencode.jsonc", "opencode.json"):
+            candidate = os.path.join(cur, name)
+            if os.path.exists(candidate):
+                paths.append(candidate)
+        parent = os.path.dirname(cur)
+        if cur == home or parent == cur:
+            break
+        cur = parent
+    return list(reversed(paths))  # root-most first, so nearer dir wins last
+
+
+def find_opencode_mcp_servers(directory):
+    """MCP servers configured for this OpenCode project: global config,
+    overridden by any project-level opencode.json(c) found above `directory`."""
+    servers = {}
+    for path in OPENCODE_GLOBAL_CONFIG_PATHS + find_project_config_paths(directory):
+        cfg = load_jsonc(path)
+        for name, spec in (cfg.get("mcp") or {}).items():
+            servers[name] = spec
+    return servers
+
+
+def load_oh_my_openagent_models():
+    """Best-effort agent-name -> model-id map from oh-my-openagent.json, if present."""
+    if not os.path.exists(OH_MY_OPENAGENT_CONFIG_PATH):
+        return {}
+    try:
+        with open(OH_MY_OPENAGENT_CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out = {}
+    for name, spec in (cfg.get("agents") or {}).items():
+        model = spec.get("model")
+        if model:
+            out[name] = model.split("/")[-1]
+    return out
+
+
+def agent_lookup_key(agent_name):
+    """Reduce a display name like 'Sisyphus - ultraworker' to a config key like 'sisyphus'."""
+    first_word = agent_name.strip().lower().split()[0] if agent_name.strip() else ""
+    return first_word.split("-")[0]
+
+
+def find_session_agents(messages, parts_by_message):
+    """Distinct agents actually referenced in this session: assistant turns
+    that ran under a given agent name, plus subagent_type values dispatched
+    via `task` tool calls (with their description text, for context)."""
+    agents = {}
+
+    def touch(name):
+        return agents.setdefault(name, {"count": 0, "descriptions": set()})
+
+    for m in messages:
+        data = json.loads(m["data"])
+        if data.get("role") == "assistant" and data.get("agent"):
+            touch(data["agent"])["count"] += 1
+        for part in parts_by_message.get(m["id"], []):
+            if part.get("type") == "tool" and part.get("tool") == "task":
+                inp = part.get("state", {}).get("input", {}) or {}
+                sub = inp.get("subagent_type")
+                if sub:
+                    entry = touch(sub)
+                    entry["count"] += 1
+                    if inp.get("description"):
+                        entry["descriptions"].add(inp["description"])
+    return agents
+
+
+def mask_secret(value):
+    if not isinstance(value, str) or len(value) <= 8:
+        return "***"
+    return value[:4] + "…" + value[-2:]
+
+
+def build_mcp_add_args(name, spec, scope, mask=False):
+    """Build the argv for `claude mcp add` from an OpenCode mcp config entry.
+    With mask=True, secret-bearing values (headers/env) are redacted, for
+    safe display in prompts/logs — never use the masked form to actually run."""
+    args = ["claude", "mcp", "add", "--scope", scope]
+    mcp_type = (spec.get("type") or "local").lower()
+
+    if mcp_type in ("remote", "http", "sse"):
+        transport = "sse" if mcp_type == "sse" else "http"
+        args += ["--transport", transport]
+        for k, v in (spec.get("headers") or {}).items():
+            shown = mask_secret(v) if mask else v
+            args += ["--header", f"{k}: {shown}"]
+        args += [name, spec.get("url", "")]
+    else:
+        command = spec.get("command") or []
+        if isinstance(command, str):
+            command = [command]
+        for k, v in (spec.get("environment") or spec.get("env") or {}).items():
+            shown = mask_secret(v) if mask else v
+            args += ["-e", f"{k}={shown}"]
+        args += [name, "--"] + list(command)
+    return args
+
+
+def agents_target_dir(scope, directory):
+    if scope == "global":
+        return os.path.expanduser("~/.claude/agents")
+    return os.path.join(directory, ".claude", "agents")
+
+
+def write_agent_stub(target_dir, agent_name, description, model=None):
+    os.makedirs(target_dir, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", agent_name.lower()).strip("-") or "agent"
+    path = os.path.join(target_dir, f"{slug}.md")
+    frontmatter = [f"name: {slug}", f"description: {description}"]
+    if model:
+        frontmatter.append(f"model: {model}")
+    body = (
+        f'Imported from an OpenCode session (agent name: "{agent_name}"). '
+        "OpenCode's system-prompt text for this agent lives inside a plugin "
+        "bundle and isn't recoverable from the session data, so this is a "
+        "stub carrying only what's genuinely observable (usage, task "
+        "descriptions, best-effort model). Replace this body with real "
+        "instructions before relying on it.\n"
+    )
+    with open(path, "w") as f:
+        f.write("---\n" + "\n".join(frontmatter) + "\n---\n\n" + body)
+    return path
+
+
+def prompt_yes_no(question, default=False):
+    suffix = " [Y/n] " if default else " [y/N] "
+    try:
+        ans = input(question + suffix).strip().lower()
+    except EOFError:
+        return default
+    if not ans:
+        return default
+    return ans in ("y", "yes")
+
+
+def prompt_choice(question, choices, default=None):
+    choice_str = "/".join(choices)
+    default_hint = f" [{default}]" if default else ""
+    while True:
+        try:
+            ans = input(f"{question} ({choice_str}){default_hint}: ").strip().lower()
+        except EOFError:
+            return default
+        if not ans and default:
+            return default
+        if ans in choices:
+            return ans
+        print(f"  Please answer one of: {choice_str}")
+
+
+def import_mcp_wizard(servers, run=subprocess.run):
+    if not servers:
+        print("No MCP servers found in OpenCode config for this project.")
+        return
+    if not prompt_yes_no(f"Import {len(servers)} MCP server(s) found in OpenCode config into Claude Code?"):
+        return
+    for name, spec in servers.items():
+        target = spec.get("url") or spec.get("command") or "?"
+        print(f"\n- {name} ({spec.get('type', 'local')}): {target}")
+        if not prompt_yes_no(f"  Import '{name}'?", default=True):
+            continue
+        scope = prompt_choice("  Scope for this MCP server", MCP_SCOPES, default="local")
+        preview = build_mcp_add_args(name, spec, scope, mask=True)
+        print(f"  Running: {' '.join(preview)}")
+        real_args = build_mcp_add_args(name, spec, scope, mask=False)
+        try:
+            run(real_args, check=True)
+        except Exception as e:
+            print(f"  Failed to add '{name}': {e}")
+
+
+def import_agents_wizard(agents_info, directory, model_map):
+    if not agents_info:
+        print("No agent usage detected in this session.")
+        return
+    if not prompt_yes_no(f"Import {len(agents_info)} agent(s) referenced in this session as Claude Code subagent stubs?"):
+        return
+    scope = prompt_choice("Scope for imported agents", AGENT_SCOPES, default="local")
+    target_dir = agents_target_dir(scope, directory)
+    for name, info in agents_info.items():
+        if not prompt_yes_no(f"  Import agent '{name}' (used {info['count']} time(s))?", default=True):
+            continue
+        description = " / ".join(sorted(info["descriptions"]))[:500] or f"Imported OpenCode agent '{name}'."
+        model = model_map.get(agent_lookup_key(name))
+        path = write_agent_stub(target_dir, name, description, model)
+        print(f"  Wrote {path}")
 
 
 class Converter:
@@ -303,15 +569,38 @@ def convert_session(converter, session_id, claude_projects_dir, dry_run=False):
     print(f"Session {session_id!r} ({session['title']!r}): {len(lines)} lines "
           f"-> {output_path}")
 
+    result = {
+        "output_path": output_path,
+        "lines": lines,
+        "directory": directory,
+        "messages": messages,
+        "parts_by_message": parts_by_message,
+    }
+
     if dry_run:
-        return output_path, lines
+        return result
 
     os.makedirs(project_dir, exist_ok=True)
     with open(output_path, "w") as f:
         for obj in lines:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    return output_path, lines
+    return result
+
+
+def run_import_wizard(result):
+    """Interactively offer to import MCP servers + agents relevant to a
+    just-converted session. `result` is convert_session()'s return value."""
+    directory = result["directory"]
+
+    print("\n--- MCP servers ---")
+    servers = find_opencode_mcp_servers(directory)
+    import_mcp_wizard(servers)
+
+    print("\n--- Agents ---")
+    agents_info = find_session_agents(result["messages"], result["parts_by_message"])
+    model_map = load_oh_my_openagent_models()
+    import_agents_wizard(agents_info, directory, model_map)
 
 
 def main():
@@ -327,6 +616,9 @@ def main():
     p_conv.add_argument("--claude-projects", default=DEFAULT_CLAUDE_PROJECTS,
                          help="Claude Code projects directory (default: ~/.claude/projects)")
     p_conv.add_argument("--dry-run", action="store_true", help="Don't write files, just report")
+    p_conv.add_argument("--wizard", choices=("auto", "always", "never"), default="auto",
+                         help="Offer to import MCP servers/agents after converting "
+                              "(auto: only for a single interactive-terminal conversion)")
 
     args = parser.parse_args()
     converter = Converter(args.db)
@@ -342,7 +634,14 @@ def main():
             for row in converter.list_sessions():
                 convert_session(converter, row["id"], args.claude_projects, args.dry_run)
         elif args.session_id:
-            convert_session(converter, args.session_id, args.claude_projects, args.dry_run)
+            result = convert_session(converter, args.session_id, args.claude_projects, args.dry_run)
+            run_wizard = {
+                "always": True,
+                "never": False,
+                "auto": not args.dry_run and sys.stdin.isatty(),
+            }[args.wizard]
+            if run_wizard:
+                run_import_wizard(result)
         else:
             parser.error("convert requires a session_id or --all")
 
