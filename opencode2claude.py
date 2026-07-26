@@ -7,6 +7,13 @@ Usage:
   opencode2claude.py list [--db PATH]
   opencode2claude.py convert <session-id> [--db PATH] [--claude-projects DIR] [--dry-run]
   opencode2claude.py convert --all [--db PATH] [--claude-projects DIR] [--dry-run]
+  opencode2claude.py import-global
+
+`import-global` imports OpenCode's *global* MCP servers and agent
+definitions into Claude Code without needing any session/opencode.db at
+all — it only reads OpenCode's own config files
+(~/.config/opencode/opencode.jsonc, ~/.config/opencode/agent/*.md,
+~/.config/opencode/oh-my-openagent.json).
 
 Notes:
   - OpenCode's real conversation data lives in a SQLite DB
@@ -38,6 +45,11 @@ Notes:
     from the session or stored locally in editable form, so the stub only
     carries what's genuinely observable (name, usage count, task
     descriptions, best-effort model mapping) and says so in its body.
+  - `import-global` does the same MCP/agent import, but session-independent:
+    MCP servers come from OpenCode's global config only, and agents come
+    from ~/.config/opencode/agent/*.md (real, full-fidelity definitions the
+    user actually wrote — copied verbatim) plus any additional names known
+    only via oh-my-openagent.json (stub fidelity, same caveat as above).
 """
 
 import argparse
@@ -243,11 +255,21 @@ def find_project_config_paths(directory):
     return list(reversed(paths))  # root-most first, so nearer dir wins last
 
 
+def find_global_mcp_servers():
+    """MCP servers configured in OpenCode's global config only (no project)."""
+    servers = {}
+    for path in OPENCODE_GLOBAL_CONFIG_PATHS:
+        cfg = load_jsonc(path)
+        for name, spec in (cfg.get("mcp") or {}).items():
+            servers[name] = spec
+    return servers
+
+
 def find_opencode_mcp_servers(directory):
     """MCP servers configured for this OpenCode project: global config,
     overridden by any project-level opencode.json(c) found above `directory`."""
-    servers = {}
-    for path in OPENCODE_GLOBAL_CONFIG_PATHS + find_project_config_paths(directory):
+    servers = dict(find_global_mcp_servers())
+    for path in find_project_config_paths(directory):
         cfg = load_jsonc(path)
         for name, spec in (cfg.get("mcp") or {}).items():
             servers[name] = spec
@@ -300,6 +322,126 @@ def find_session_agents(messages, parts_by_message):
                     if inp.get("description"):
                         entry["descriptions"].add(inp["description"])
     return agents
+
+
+GLOBAL_AGENT_DIR = os.path.expanduser("~/.config/opencode/agent")
+
+
+def parse_scalar(v):
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1]
+    return v
+
+
+def parse_frontmatter(text):
+    """Minimal YAML-ish frontmatter parser: flat `key: value` pairs plus one
+    level of nested `key:\\n  sub: value` maps — enough for typical OpenCode
+    agent markdown files, without pulling in a YAML dependency."""
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    fm_text = text[3:end].strip("\n")
+    body = text[end + 4:].lstrip("\n")
+
+    data = {}
+    current_key = None
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+        if line[:1] in (" ", "\t") and current_key is not None:
+            k, sep, v = line.strip().partition(":")
+            if sep and isinstance(data.get(current_key), dict):
+                data[current_key][k.strip()] = parse_scalar(v.strip())
+            continue
+        k, sep, v = line.partition(":")
+        if not sep:
+            continue
+        k, v = k.strip(), v.strip()
+        if v == "":
+            data[k] = {}
+            current_key = k
+        else:
+            data[k] = parse_scalar(v)
+            current_key = None
+    return data, body
+
+
+def find_global_agent_files():
+    """Real, full-fidelity agent definitions the user authored themselves as
+    ~/.config/opencode/agent/*.md — unlike plugin-bundled agents, these have
+    genuine recoverable prompt content."""
+    defs = {}
+    if not os.path.isdir(GLOBAL_AGENT_DIR):
+        return defs
+    for fname in sorted(os.listdir(GLOBAL_AGENT_DIR)):
+        if not fname.endswith(".md"):
+            continue
+        path = os.path.join(GLOBAL_AGENT_DIR, fname)
+        with open(path) as f:
+            text = f.read()
+        frontmatter, body = parse_frontmatter(text)
+        slug = re.sub(r"[^a-z0-9]+", "-", os.path.splitext(fname)[0].lower()).strip("-")
+        defs[slug] = {
+            "kind": "file",
+            "display_name": frontmatter.get("name", os.path.splitext(fname)[0]),
+            "path": path,
+            "frontmatter": frontmatter,
+            "body": body,
+        }
+    return defs
+
+
+def find_global_agent_definitions():
+    """All agents importable without a session: real markdown files under
+    ~/.config/opencode/agent/ (full fidelity) plus any additional names only
+    known via oh-my-openagent.json's model-routing config (stub fidelity,
+    same caveat as session-based stubs — real files always take precedence)."""
+    defs = find_global_agent_files()
+    if os.path.exists(OH_MY_OPENAGENT_CONFIG_PATH):
+        try:
+            with open(OH_MY_OPENAGENT_CONFIG_PATH) as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            cfg = {}
+        for name, spec in (cfg.get("agents") or {}).items():
+            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+            if slug in defs:
+                continue
+            model = spec.get("model")
+            defs[slug] = {
+                "kind": "stub",
+                "display_name": name,
+                "model": model.split("/")[-1] if model else None,
+            }
+    return defs
+
+
+def build_claude_agent_frontmatter(slug, oc_frontmatter):
+    lines = [f"name: {slug}"]
+    description = oc_frontmatter.get("description") or f"Imported from OpenCode agent '{slug}'."
+    lines.append(f"description: {description}")
+    model = oc_frontmatter.get("model")
+    if model:
+        lines.append(f"model: {str(model).split('/')[-1]}")
+    tools = oc_frontmatter.get("tools")
+    if isinstance(tools, dict):
+        enabled = [k for k, v in tools.items() if v]
+        if enabled:
+            lines.append(f"tools: {', '.join(enabled)}")
+    return lines
+
+
+def write_full_agent_file(target_dir, slug, oc_frontmatter, body):
+    os.makedirs(target_dir, exist_ok=True)
+    path = os.path.join(target_dir, f"{slug}.md")
+    frontmatter_lines = build_claude_agent_frontmatter(slug, oc_frontmatter)
+    with open(path, "w") as f:
+        f.write("---\n" + "\n".join(frontmatter_lines) + "\n---\n\n" + body)
+    return path
 
 
 def mask_secret(value):
@@ -385,9 +527,18 @@ def prompt_choice(question, choices, default=None):
         print(f"  Please answer one of: {choice_str}")
 
 
-def import_mcp_wizard(servers, run=subprocess.run):
+def prompt_text(question, default=""):
+    suffix = f" [{default}]" if default else ""
+    try:
+        ans = input(f"{question}{suffix}: ").strip()
+    except EOFError:
+        return default
+    return ans or default
+
+
+def import_mcp_wizard(servers, run=subprocess.run, default_scope="local"):
     if not servers:
-        print("No MCP servers found in OpenCode config for this project.")
+        print("No MCP servers found in OpenCode config.")
         return
     if not prompt_yes_no(f"Import {len(servers)} MCP server(s) found in OpenCode config into Claude Code?"):
         return
@@ -396,7 +547,7 @@ def import_mcp_wizard(servers, run=subprocess.run):
         print(f"\n- {name} ({spec.get('type', 'local')}): {target}")
         if not prompt_yes_no(f"  Import '{name}'?", default=True):
             continue
-        scope = prompt_choice("  Scope for this MCP server", MCP_SCOPES, default="local")
+        scope = prompt_choice("  Scope for this MCP server", MCP_SCOPES, default=default_scope)
         preview = build_mcp_add_args(name, spec, scope, mask=True)
         print(f"  Running: {' '.join(preview)}")
         real_args = build_mcp_add_args(name, spec, scope, mask=False)
@@ -420,6 +571,36 @@ def import_agents_wizard(agents_info, directory, model_map):
         description = " / ".join(sorted(info["descriptions"]))[:500] or f"Imported OpenCode agent '{name}'."
         model = model_map.get(agent_lookup_key(name))
         path = write_agent_stub(target_dir, name, description, model)
+        print(f"  Wrote {path}")
+
+
+def import_global_agents_wizard(agent_defs):
+    if not agent_defs:
+        print("No global OpenCode agent definitions found "
+              f"({GLOBAL_AGENT_DIR}/*.md or {OH_MY_OPENAGENT_CONFIG_PATH}).")
+        return
+    if not prompt_yes_no(f"Import {len(agent_defs)} agent(s) found in your global OpenCode config?"):
+        return
+    scope = prompt_choice("Scope for imported agents", AGENT_SCOPES, default="global")
+    if scope == "global":
+        target_dir = os.path.expanduser("~/.claude/agents")
+    else:
+        target = prompt_text("  Target project directory", default=os.getcwd())
+        target_dir = os.path.join(target, ".claude", "agents")
+
+    for slug, info in agent_defs.items():
+        label = info["display_name"]
+        kind_label = "full definition" if info["kind"] == "file" else "stub (no local source found)"
+        if not prompt_yes_no(f"  Import '{label}' ({kind_label})?", default=True):
+            continue
+        if info["kind"] == "file":
+            path = write_full_agent_file(target_dir, slug, info["frontmatter"], info["body"])
+        else:
+            path = write_agent_stub(
+                target_dir, label,
+                f"Imported OpenCode agent '{label}' (from global config, no session context).",
+                model=info.get("model"),
+            )
         print(f"  Wrote {path}")
 
 
@@ -620,7 +801,19 @@ def main():
                          help="Offer to import MCP servers/agents after converting "
                               "(auto: only for a single interactive-terminal conversion)")
 
+    sub.add_parser("import-global",
+                    help="Import OpenCode's global MCP servers and agent definitions into "
+                         "Claude Code, without needing any session/opencode.db")
+
     args = parser.parse_args()
+
+    if args.cmd == "import-global":
+        print("--- MCP servers (global OpenCode config) ---")
+        import_mcp_wizard(find_global_mcp_servers(), default_scope="user")
+        print("\n--- Agents (global OpenCode config) ---")
+        import_global_agents_wizard(find_global_agent_definitions())
+        return
+
     converter = Converter(args.db)
 
     if args.cmd == "list":

@@ -34,6 +34,42 @@ After converting, resume the session from the project directory it belongs to:
 cd /path/to/project && claude --resume <printed-uuid>
 ```
 
+After converting a single session (interactively, not `--all`), a wizard
+offers to also import:
+
+- **MCP servers** configured for that OpenCode project (global +
+  project-level `opencode.json(c)`) via the real `claude mcp add` CLI, at
+  `local`/`project`/`user` scope, one server at a time.
+- **Agents** referenced in the session (assistant turns + `task` tool
+  `subagent_type` calls) as Claude Code subagent stubs
+  (`.claude/agents/*.md`, `local` or `global` scope). These are honest
+  placeholders — OpenCode's real system-prompt text for built-in/plugin
+  agents (Sisyphus, Oracle, Librarian, ...) is compiled into a third-party
+  plugin bundle and isn't recoverable from the session, so the stub only
+  carries what's genuinely observable (name, usage count, task
+  descriptions, best-effort model from `oh-my-openagent.json`) and says so.
+
+Control it with `convert ... --wizard {auto,always,never}` (default `auto`:
+runs only for a single, non-dry-run conversion in an interactive terminal).
+
+### import-global — no session needed
+
+```bash
+./opencode2claude.py import-global
+```
+
+Same MCP/agent import wizard, but independent of any session or
+`opencode.db`:
+
+- MCP servers come from OpenCode's **global** config only
+  (`~/.config/opencode/opencode.jsonc`).
+- Agents come from `~/.config/opencode/agent/*.md` — real files the user
+  actually authored, copied **verbatim** (frontmatter translated, body
+  untouched) — plus any additional agent names known only via
+  `oh-my-openagent.json`'s model-routing config (stub fidelity, same
+  caveat as above; a real file always takes precedence over a stub for the
+  same agent name).
+
 ### Design notes
 
 - One OpenCode assistant `message` row maps to one Claude Code assistant API
