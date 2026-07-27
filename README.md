@@ -21,6 +21,27 @@ share small `harness_common.py` / `vscode_common.py` modules (JSONC
 parsing, frontmatter parsing, secret masking, interactive prompts, VS Code
 session decoding/encoding) so behavior stays consistent across all of them.
 
+## Installation
+
+Symlink `harness2go.py` as `h2go` into a directory already on your `PATH`
+(e.g. `~/.local/bin`, if you keep other tools there):
+
+```bash
+ln -sf "$(pwd)/harness2go.py" ~/.local/bin/h2go
+```
+
+Then from anywhere:
+
+```bash
+h2go opencode2claude list
+h2go claude2vscode convert <session-uuid>
+```
+
+No `pip install` needed — it's plain stdlib Python, so the symlink alone is
+enough; `harness2go.py` resolves its sibling modules (`opencode2claude.py`,
+`vscode_common.py`, etc.) relative to itself regardless of where it's
+invoked from.
+
 ## opencode2claude.py — OpenCode → Claude Code
 
 Converts an OpenCode session into a Claude Code session transcript
