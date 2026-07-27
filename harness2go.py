@@ -9,19 +9,22 @@ Usage:
   harness2go.py claude2opencode <list|convert|import-global> ...
   harness2go.py vscode2opencode <list|convert> ...
   harness2go.py vscode2claude   <list|convert> ...
+  harness2go.py opencode2vscode <list|convert> ...
+  harness2go.py claude2vscode   <list|convert> ...
 
 This is a thin dispatcher; run `harness2go.py <direction> --help` for the
 full set of options for that direction. Each direction also works as a
 standalone script (opencode2claude.py / claude2opencode.py /
-vscode2opencode.py / vscode2claude.py) for anyone who only ever migrates
-one way. VS Code support is currently one-way (reading VS Code sessions
-out); writing new VS Code sessions is a possible follow-up.
+vscode2opencode.py / vscode2claude.py / opencode2vscode.py /
+claude2vscode.py) for anyone who only ever migrates one way.
 """
 
 import sys
 
 import claude2opencode
+import claude2vscode
 import opencode2claude
+import opencode2vscode
 import vscode2claude
 import vscode2opencode
 
@@ -30,6 +33,8 @@ DIRECTIONS = {
     "claude2opencode": claude2opencode.main,
     "vscode2opencode": vscode2opencode.main,
     "vscode2claude": vscode2claude.main,
+    "opencode2vscode": opencode2vscode.main,
+    "claude2vscode": claude2vscode.main,
 }
 
 

@@ -193,6 +193,61 @@ def build_usage(tokens, cost):
     }
 
 
+def build_turns_from_opencode(messages, parts_by_message):
+    """OpenCode session rows -> the canonical "turns" shape shared with
+    claude2opencode.parse_claude_transcript()'s output (role/text/created
+    for user turns; role/message_id/model/usage/stop_reason/created/blocks
+    for assistant turns, blocks typed "text"/"thinking"/"tool_use"). Used by
+    vscode2opencode... no — by opencode2vscode.py, so it can build on the
+    same vscode_common.build_vscode_session() that claude2vscode.py uses,
+    instead of a separate OpenCode-specific VS Code builder."""
+    turns = []
+    for m in messages:
+        data = json.loads(m["data"])
+        role = data.get("role")
+        parts = [p for p in parts_by_message.get(m["id"], [])
+                 if p.get("type") not in ("step-start", "step-finish")]
+        created_ms = data.get("time", {}).get("created", m["time_created"])
+
+        if role == "user":
+            text = "\n".join(p.get("text", "") for p in parts if p.get("type") == "text")
+            turns.append({"role": "user", "text": text, "created": created_ms})
+            continue
+
+        if role != "assistant" or not parts:
+            continue
+
+        blocks = []
+        for part in parts:
+            ptype = part.get("type")
+            if ptype == "text":
+                blocks.append({"type": "text", "text": part.get("text", "")})
+            elif ptype == "reasoning":
+                blocks.append({"type": "thinking", "thinking": part.get("text", "")})
+            elif ptype == "tool":
+                tool_name, tool_input = map_tool(part)
+                blocks.append({
+                    "type": "tool_use",
+                    "id": part.get("callID", f"call_{uuid.uuid4().hex[:12]}"),
+                    "name": tool_name,
+                    "input": tool_input,
+                    "_result_text": tool_output_text(part),
+                    "_is_error": part.get("state", {}).get("status") == "error",
+                })
+
+        tokens = data.get("tokens") or {}
+        turns.append({
+            "role": "assistant",
+            "message_id": m["id"],
+            "model": data.get("modelID", "unknown"),
+            "usage": {"input_tokens": tokens.get("input", 0), "output_tokens": tokens.get("output", 0)},
+            "stop_reason": map_stop_reason(data.get("finish")),
+            "created": created_ms,
+            "blocks": blocks,
+        })
+    return turns
+
+
 def find_project_config_paths(directory):
     """Walk from `directory` up to $HOME looking for opencode.json(c)."""
     home = os.path.expanduser("~")

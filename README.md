@@ -9,19 +9,17 @@ Claude Code, and VS Code (GitHub Copilot Chat).
 ./harness2go.py claude2opencode <list|convert|import-global> ...
 ./harness2go.py vscode2opencode <list|convert> ...
 ./harness2go.py vscode2claude   <list|convert> ...
+./harness2go.py opencode2vscode <list|convert> ...
+./harness2go.py claude2vscode   <list|convert> ...
 ```
 
 `harness2go.py` is a thin dispatcher over standalone scripts —
 `opencode2claude.py`, `claude2opencode.py`, `vscode2opencode.py`,
-`vscode2claude.py` — each of which also works on its own if you only ever
-migrate one direction. They share small `harness_common.py` /
-`vscode_common.py` modules (JSONC parsing, frontmatter parsing, secret
-masking, interactive prompts, VS Code session decoding) so behavior stays
-consistent across all of them.
-
-VS Code support is currently **one-way** (reading Copilot Chat sessions
-out into OpenCode/Claude Code); writing new VS Code sessions is a possible
-follow-up.
+`vscode2claude.py`, `opencode2vscode.py`, `claude2vscode.py` — each of
+which also works on its own if you only ever migrate one direction. They
+share small `harness_common.py` / `vscode_common.py` modules (JSONC
+parsing, frontmatter parsing, secret masking, interactive prompts, VS Code
+session decoding/encoding) so behavior stays consistent across all of them.
 
 ## opencode2claude.py — OpenCode → Claude Code
 
@@ -205,6 +203,53 @@ Two things worth knowing:
   not shaped like a real response id. (Discovered by testing an actual
   resume against a converted session — the API returned a 400 until this
   was fixed.)
+
+## opencode2vscode.py / claude2vscode.py — OpenCode/Claude Code → VS Code (Copilot Chat)
+
+The reverse of `vscode2opencode.py`/`vscode2claude.py`: writes a **real,
+openable VS Code chat session**.
+
+```bash
+./opencode2vscode.py convert ses_XXXXXXXXXXXX [--dry-run]
+./claude2vscode.py convert <session-uuid> [--dry-run]
+```
+
+**This one needs more than a session file.** VS Code's Chat view discovers
+sessions purely through an index kept in `state.vscdb` (its
+general-purpose settings store) — confirmed by reading
+`chatSessionStore.ts`'s actual load path, which has no fallback that scans
+the session folder. A session file dropped in without a matching index
+entry is invisible to the UI. So `convert`:
+
+- Writes the session file (`.json`) in the right location.
+- Merges a matching entry into `state.vscdb`'s `chat.ChatSessionStore.index`
+  key (an `ItemTable` row, standard VS Code storage-service SQLite), always
+  taking a timestamped backup of `state.vscdb` first.
+- **Refuses to run if VS Code is currently open.** That index is cached in
+  memory by a running window and only read fresh on cold start — writing it
+  underneath a live VS Code process risks the change being silently
+  discarded the next time that window saves any chat state at all. Close
+  VS Code first.
+- Only targets an **existing** VS Code workspace, matched by directory (the
+  same `workspace.json` lookup `vscode2opencode.py`/`vscode2claude.py` use
+  for reading). If the target project has never been opened in VS Code, the
+  session is written as a no-folder ("empty window") chat instead of
+  inventing a new workspace — the same "never fabricate what isn't already
+  there" discipline as the MCP/agent import directions.
+
+Content mapping mirrors the read direction in reverse: text/reasoning
+(OpenCode) or text/thinking (Claude Code) become VS Code `markdownContent`/
+`thinking` blocks, and tool calls become `toolInvocationSerialized` blocks
+— with the tool's original input rendered as a human-readable summary
+(VS Code's serialized format has no slot for raw structured arguments) and
+its output carried in `resultDetails` when there is one.
+
+Validated with a real three-way round trip: a real VS Code session was
+converted to Claude Code (previous PR), then converted back to VS Code
+with this code (against a throwaway copy of `state.vscdb`, never the real
+one) — replaying the written file reproduced the original conversation
+content, and the index entry showed up correctly alongside the
+pre-existing real entries, untouched.
 
 ## Requirements
 
