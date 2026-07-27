@@ -1,19 +1,27 @@
 # harness2go
 
 A swiss-army knife for migrating coding-agent harness sessions — and their
-MCP server / subagent config — between [OpenCode](https://opencode.ai) and
-Claude Code.
+MCP server / subagent config — between [OpenCode](https://opencode.ai),
+Claude Code, and VS Code (GitHub Copilot Chat).
 
 ```bash
 ./harness2go.py opencode2claude <list|convert|import-global> ...
 ./harness2go.py claude2opencode <list|convert|import-global> ...
+./harness2go.py vscode2opencode <list|convert> ...
+./harness2go.py vscode2claude   <list|convert> ...
 ```
 
-`harness2go.py` is a thin dispatcher over two standalone scripts —
-`opencode2claude.py` and `claude2opencode.py` — each of which also works on
-its own if you only ever migrate one direction. Both share a small
-`harness_common.py` module (JSONC parsing, frontmatter parsing, secret
-masking, interactive prompts) so behavior stays identical on both sides.
+`harness2go.py` is a thin dispatcher over standalone scripts —
+`opencode2claude.py`, `claude2opencode.py`, `vscode2opencode.py`,
+`vscode2claude.py` — each of which also works on its own if you only ever
+migrate one direction. They share small `harness_common.py` /
+`vscode_common.py` modules (JSONC parsing, frontmatter parsing, secret
+masking, interactive prompts, VS Code session decoding) so behavior stays
+consistent across all of them.
+
+VS Code support is currently **one-way** (reading Copilot Chat sessions
+out into OpenCode/Claude Code); writing new VS Code sessions is a possible
+follow-up.
 
 ## opencode2claude.py — OpenCode → Claude Code
 
@@ -138,6 +146,65 @@ them), so the backup is the safety net.
   appears to key everything off a single project per install rather than
   one per directory — a fresh `project` row is only created if none
   exists at all).
+
+## vscode2opencode.py / vscode2claude.py — VS Code (Copilot Chat) → OpenCode/Claude Code
+
+VS Code (via the GitHub Copilot Chat extension) stores chat sessions as an
+append-only "operation log" — not a simple flat file. The first line is a
+full JSON snapshot (`kind: 0`); later lines are `Set`/`Push`/`Delete`
+patches against explicit object paths (verified against VS Code's own
+source, `chatSessionStore.ts`/`objectMutationLog.ts` in
+`microsoft/vscode`). Sessions live in two places:
+
+- No-folder ("empty window") chats: `~/Library/Application Support/Code/User/globalStorage/emptyWindowChatSessions/<uuid>.json[l]`
+- Per-project chats: `~/Library/Application Support/Code/User/workspaceStorage/<hash>/chatSessions/<uuid>.json[l]` (the hash's `workspace.json` maps it to a folder)
+
+`vscode_common.py` replays that log and normalizes it into the same
+canonical "turns" shape `claude2opencode.py`'s transcript parser produces,
+so both converters build on one shared reader.
+
+```bash
+./vscode2opencode.py list
+./vscode2opencode.py convert <session-uuid> [--directory DIR] [--dry-run]
+
+./vscode2claude.py list
+./vscode2claude.py convert <session-uuid> [--directory DIR] [--dry-run]
+```
+
+`--directory` is required (or falls back to the current working directory
+with a warning) for no-folder sessions, which have no natural project
+association.
+
+**Scope — core content only.** A single VS Code response can contain any
+of ~35 distinct content-block kinds (progress messages,
+`mcpServersStarting` notices, confirmations, todoList widgets, terminal/
+notebook/file-edit blocks, pull requests, ...). Only the substantive ones
+are mapped — text/markdown, `thinking`, and `toolInvocationSerialized` — the
+same content OpenCode/Claude Code already model; everything else is UI
+chrome, dropped the same way `opencode2claude.py` drops OpenCode's
+`step-start`/`step-finish` structural markers.
+
+Two things worth knowing:
+- VS Code's own tool names (`run_in_terminal`, `copilot_readFile`, ...)
+  don't match either target's tool vocabulary, so they pass through
+  verbatim (lowercased on the OpenCode side, unchanged on the Claude Code
+  side) rather than being misleadingly relabeled — an accepted limitation
+  of "core content only," not a bug. Likewise, a tool's persisted
+  "input" is often just VS Code's human-readable invocation message
+  (e.g. "Reading file.py"), not the tool's real structured arguments —
+  that's what's actually available in the serialized log.
+- `thinking` blocks become plain `text` (Claude Code target) or
+  `reasoning` (OpenCode target) — never a real Anthropic `thinking` block —
+  since these turns frequently aren't even from an Anthropic model (VS
+  Code routes through GPT/Gemini/etc. too), so a fabricated signature would
+  be actively wrong, not just unnecessary.
+- On the Claude Code side specifically: message ids are always freshly
+  synthesized as `msg_<hex>`, never VS Code's own `request_<uuid>` — Claude
+  Code sends the last assistant message's `id` back to the API as a
+  `previous_message_id` diagnostic on resume, and the API rejects anything
+  not shaped like a real response id. (Discovered by testing an actual
+  resume against a converted session — the API returned a 400 until this
+  was fixed.)
 
 ## Requirements
 
