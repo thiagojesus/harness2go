@@ -8,6 +8,14 @@ Usage:
   vscode2claude.py list [--vscode-user-dir DIR]
   vscode2claude.py convert <session-uuid-or-path> [--directory DIR]
                            [--claude-projects DIR] [--dry-run]
+  vscode2claude.py import-global [--vscode-user-dir DIR]
+
+`import-global` imports VS Code's own global MCP servers
+(<vscode-user-dir>/mcp.json) into Claude Code's user scope, via the real
+`claude mcp add --scope user` CLI (the two schemas are field-identical, so
+this is close to a straight copy), and VS Code's own global custom agents
+(~/.copilot/agents/*.md — its own convention, not the ones already shared
+with Claude Code) into ~/.claude/agents/*.md. No session needed.
 
 Notes:
   - See vscode_common.py for how VS Code's chat session format is decoded
@@ -32,12 +40,47 @@ Notes:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import uuid
 
 from .opencode2claude import detect_claude_version, detect_git_branch, iso_ms
-from .harness_common import slugify_cwd
+from .claude2opencode import GLOBAL_CLAUDE_AGENT_DIR, find_claude_agent_files
+from .harness_common import prompt_yes_no, slugify_cwd
 from . import vscode_common as vc
+
+
+def import_mcp_wizard_to_claude(servers, run=subprocess.run):
+    if not servers:
+        print("No MCP servers found in VS Code's global config.")
+        return
+    if not prompt_yes_no(f"Import {len(servers)} MCP server(s) from VS Code into Claude Code (user scope)?"):
+        return
+    for name, spec in servers.items():
+        target = spec.get("url") or spec.get("command") or "?"
+        print(f"\n- {name} ({spec.get('type', 'stdio')}): {target}")
+        if not prompt_yes_no(f"  Import '{name}'?", default=True):
+            continue
+        preview = vc.build_claude_mcp_add_args_from_spec(name, spec, "user", mask=True)
+        print(f"  Running: {' '.join(preview)}")
+        real_args = vc.build_claude_mcp_add_args_from_spec(name, spec, "user", mask=False)
+        try:
+            run(real_args, check=True)
+        except Exception as e:
+            print(f"  Failed to add '{name}': {e}")
+
+
+def import_agents_wizard_to_claude(agent_defs):
+    if not agent_defs:
+        print("No VS Code global custom agents found.")
+        return
+    if not prompt_yes_no(f"Import {len(agent_defs)} agent(s) from VS Code into Claude Code?"):
+        return
+    for slug, info in agent_defs.items():
+        if not prompt_yes_no(f"  Import '{info['display_name']}'?", default=True):
+            continue
+        path = vc.write_claude_agent_file(GLOBAL_CLAUDE_AGENT_DIR, slug, info["frontmatter"], info["body"])
+        print(f"  Wrote {path}")
 
 
 def build_claude_transcript(directory, turns, claude_version):
@@ -160,7 +203,18 @@ def main():
     p_conv.add_argument("--claude-projects", default=os.path.expanduser("~/.claude/projects"))
     p_conv.add_argument("--dry-run", action="store_true")
 
+    p_global = sub.add_parser("import-global",
+                               help="Import VS Code's global MCP servers and agents into Claude Code")
+    p_global.add_argument("--vscode-user-dir", default=vc.DEFAULT_VSCODE_USER_DIR)
+
     args = parser.parse_args()
+
+    if args.cmd == "import-global":
+        print("--- MCP servers (VS Code global config) ---")
+        import_mcp_wizard_to_claude(vc.find_vscode_global_mcp_servers(args.vscode_user_dir))
+        print("\n--- Agents (VS Code global config) ---")
+        import_agents_wizard_to_claude(find_claude_agent_files(vc.VSCODE_GLOBAL_AGENT_DIR))
+        return
 
     if args.cmd == "list":
         for info in vc.list_vscode_sessions(args.vscode_user_dir):
