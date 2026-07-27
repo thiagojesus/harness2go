@@ -26,10 +26,7 @@ decoding/encoding) so behavior stays consistent across all of them.
 
 ## Installation
 
-Zero runtime dependencies (plain standard library) — a regular Python
-package, installable with either `pip` or `uv`.
-
-**From PyPI** (once published — see [Publishing](#publishing) below):
+Zero runtime dependencies (plain standard library).
 
 ```bash
 uv tool install harness2go
@@ -39,33 +36,9 @@ pip install harness2go
 uvx --from harness2go h2go opencode2claude list
 ```
 
-**From source, without waiting on a release** — as a global CLI tool
-(puts `h2go` and the six standalone commands on your `PATH`):
-
-```bash
-uv tool install .          # from a clone of this repo
-# or, without cloning:
-uv tool install git+https://github.com/thiagojesus/harness2go
-```
-
-`pip`-only equivalent (installs into whichever environment is currently
-active — a fresh `pipx install .` also works if you have `pipx`):
-
-```bash
-pip install .
-```
-
-**For development** (editable install, so local edits take effect
-immediately without reinstalling):
-
-```bash
-uv venv && source .venv/bin/activate && uv pip install -e .
-# or: python3 -m venv .venv && source .venv/bin/activate && pip install -e .
-
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-Then from anywhere:
+This puts `h2go` and the six standalone commands (`opencode2claude`,
+`claude2opencode`, `vscode2opencode`, `vscode2claude`, `opencode2vscode`,
+`claude2vscode`) on your `PATH`. Then from anywhere:
 
 ```bash
 h2go opencode2claude list
@@ -370,32 +343,3 @@ harness2go/
 │   └── claude2vscode.py
 └── tests/                  # unittest suite, run against the installed package
 ```
-
-## Publishing
-
-Releases publish to PyPI automatically via
-[Trusted Publishing](https://docs.pypi.org/trusted-publishers/) — no API
-token stored anywhere; GitHub's OIDC identity authenticates the publish
-(`.github/workflows/publish.yml`). One-time setup (do this once, on PyPI
-and GitHub — not something a CI job can do for you):
-
-1. Create a PyPI account at [pypi.org](https://pypi.org) if you don't have
-   one (2FA is required).
-2. On PyPI: **Your projects → Publishing → Add a new pending publisher**,
-   and fill in:
-   - PyPI project name: `harness2go`
-   - Owner: `thiagojesus`
-   - Repository name: `harness2go`
-   - Workflow filename: `publish.yml`
-   - Environment name: `pypi`
-3. On GitHub: **Settings → Environments → New environment**, name it
-   `pypi` (matching step 2; optionally add protection rules like required
-   reviewers).
-4. Cut a [GitHub Release](https://github.com/thiagojesus/harness2go/releases/new)
-   (tag it e.g. `v0.1.0`, matching the version in `pyproject.toml`) — the
-   `publish.yml` workflow triggers on release publish, builds the
-   sdist/wheel, and uploads them to PyPI automatically.
-
-For each subsequent release: bump `version` in `pyproject.toml`, commit,
-tag, and cut a new GitHub Release — no PyPI-side setup needed again after
-the first time.
