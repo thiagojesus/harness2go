@@ -8,7 +8,26 @@ version = "0.1.0"
 description = "Swiss-army knife for migrating coding-agent harness sessions (and their MCP/agent config) between OpenCode, Claude Code, and VS Code"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Thiago Jesus" },
+]
+keywords = ["opencode", "claude-code", "vscode", "copilot-chat", "cli", "migration"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/thiagojesus/harness2go"
+Repository = "https://github.com/thiagojesus/harness2go"
+Issues = "https://github.com/thiagojesus/harness2go/issues"
 
 [project.scripts]
 h2go = "harness2go.cli:main"
