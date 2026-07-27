@@ -6,9 +6,8 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vscode_common as vc
-import opencode2claude as oc
+from harness2go import vscode_common as vc
+from harness2go import opencode2claude as oc
 
 
 def sample_turns():

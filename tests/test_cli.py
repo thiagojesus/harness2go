@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-import os
 import subprocess
 import sys
 import unittest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-
 
 class Dispatcher(unittest.TestCase):
     def _run(self, args):
-        return subprocess.run([sys.executable, os.path.join(HERE, "harness2go.py")] + args,
+        return subprocess.run([sys.executable, "-m", "harness2go.cli"] + args,
                                capture_output=True, text=True, timeout=15)
 
     def test_no_args_prints_usage_and_exits_zero(self):

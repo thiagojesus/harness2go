@@ -6,9 +6,8 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import claude2opencode as co
-import vscode2opencode as m
+from harness2go import claude2opencode as co
+from harness2go import vscode2opencode as m
 
 SCHEMA = """
     CREATE TABLE project (
@@ -66,7 +65,7 @@ class Vscode2OpencodeEndToEnd(unittest.TestCase):
             db_path = os.path.join(d, "opencode.db")
             make_db(db_path)
 
-            import vscode_common as vc
+            from harness2go import vscode_common as vc
             turns = vc.parse_vscode_session(session_path)
             session_row, messages, parts = co.build_opencode_session("/proj", turns, "1.0.0")
 

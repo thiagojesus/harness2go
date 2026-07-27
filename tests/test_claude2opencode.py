@@ -9,8 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import claude2opencode as m
+from harness2go import claude2opencode as m
 
 
 def write_jsonl(path, lines):

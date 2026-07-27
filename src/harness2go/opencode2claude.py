@@ -61,7 +61,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-from harness_common import (
+from .harness_common import (
     load_jsonc,
     mask_secret,
     parse_frontmatter,
