@@ -29,8 +29,8 @@ Notes:
 
 import argparse
 
-import opencode2claude as oc
-import vscode_common as vc
+from . import opencode2claude as oc
+from . import vscode_common as vc
 
 
 def main():

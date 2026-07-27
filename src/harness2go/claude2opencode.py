@@ -52,7 +52,7 @@ import time
 import uuid
 from datetime import datetime
 
-from harness_common import (
+from .harness_common import (
     has_jsonc_comments,
     load_jsonc,
     mask_secret,

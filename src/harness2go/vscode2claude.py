@@ -35,9 +35,9 @@ import os
 import sys
 import uuid
 
-from opencode2claude import detect_claude_version, detect_git_branch, iso_ms
-from harness_common import slugify_cwd
-import vscode_common as vc
+from .opencode2claude import detect_claude_version, detect_git_branch, iso_ms
+from .harness_common import slugify_cwd
+from . import vscode_common as vc
 
 
 def build_claude_transcript(directory, turns, claude_version):

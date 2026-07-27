@@ -31,8 +31,8 @@ import argparse
 import os
 import sys
 
-import claude2opencode as co
-import vscode_common as vc
+from . import claude2opencode as co
+from . import vscode_common as vc
 
 
 def main():

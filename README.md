@@ -5,29 +5,51 @@ MCP server / subagent config — between [OpenCode](https://opencode.ai),
 Claude Code, and VS Code (GitHub Copilot Chat).
 
 ```bash
-./harness2go.py opencode2claude <list|convert|import-global> ...
-./harness2go.py claude2opencode <list|convert|import-global> ...
-./harness2go.py vscode2opencode <list|convert> ...
-./harness2go.py vscode2claude   <list|convert> ...
-./harness2go.py opencode2vscode <list|convert> ...
-./harness2go.py claude2vscode   <list|convert> ...
+h2go opencode2claude <list|convert|import-global> ...
+h2go claude2opencode <list|convert|import-global> ...
+h2go vscode2opencode <list|convert> ...
+h2go vscode2claude   <list|convert> ...
+h2go opencode2vscode <list|convert> ...
+h2go claude2vscode   <list|convert> ...
 ```
 
-`harness2go.py` is a thin dispatcher over standalone scripts —
-`opencode2claude.py`, `claude2opencode.py`, `vscode2opencode.py`,
-`vscode2claude.py`, `opencode2vscode.py`, `claude2vscode.py` — each of
-which also works on its own if you only ever migrate one direction. They
-share small `harness_common.py` / `vscode_common.py` modules (JSONC
-parsing, frontmatter parsing, secret masking, interactive prompts, VS Code
-session decoding/encoding) so behavior stays consistent across all of them.
+`h2go` is a thin dispatcher over the six directions, each of which is also
+installed as its own standalone command (`opencode2claude`,
+`claude2opencode`, `vscode2opencode`, `vscode2claude`, `opencode2vscode`,
+`claude2vscode`) for anyone who only ever migrates one way. They share
+small `harness_common.py` / `vscode_common.py` modules (JSONC parsing,
+frontmatter parsing, secret masking, interactive prompts, VS Code session
+decoding/encoding) so behavior stays consistent across all of them.
 
 ## Installation
 
-Symlink `harness2go.py` as `h2go` into a directory already on your `PATH`
-(e.g. `~/.local/bin`, if you keep other tools there):
+Zero runtime dependencies (plain standard library) — a regular Python
+package, installable with either `pip` or `uv`.
+
+**As a global CLI tool** (recommended for everyday use — puts `h2go` and
+the six standalone commands on your `PATH`):
 
 ```bash
-ln -sf "$(pwd)/harness2go.py" ~/.local/bin/h2go
+uv tool install .          # from a clone of this repo
+# or, without cloning:
+uv tool install git+https://github.com/thiagojesus/harness2go
+```
+
+`pip`-only equivalent (installs into whichever environment is currently
+active — a fresh `pipx install .` also works if you have `pipx`):
+
+```bash
+pip install .
+```
+
+**For development** (editable install, so local edits take effect
+immediately without reinstalling):
+
+```bash
+uv venv && source .venv/bin/activate && uv pip install -e .
+# or: python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 Then from anywhere:
@@ -37,12 +59,7 @@ h2go opencode2claude list
 h2go claude2vscode convert <session-uuid>
 ```
 
-No `pip install` needed — it's plain stdlib Python, so the symlink alone is
-enough; `harness2go.py` resolves its sibling modules (`opencode2claude.py`,
-`vscode_common.py`, etc.) relative to itself regardless of where it's
-invoked from.
-
-## opencode2claude.py — OpenCode → Claude Code
+## opencode2claude — OpenCode → Claude Code
 
 Converts an OpenCode session into a Claude Code session transcript
 (`.jsonl`) that Claude Code can list and `--resume`.
@@ -55,16 +72,16 @@ wrappers leave lying around. This script reads directly from that DB
 
 ```bash
 # List every OpenCode session available to convert
-./opencode2claude.py list
+opencode2claude list
 
 # Convert one session (writes into ~/.claude/projects/<slug>/<new-uuid>.jsonl)
-./opencode2claude.py convert ses_XXXXXXXXXXXX
+opencode2claude convert ses_XXXXXXXXXXXX
 
 # Convert everything
-./opencode2claude.py convert --all
+opencode2claude convert --all
 
 # Preview without writing anything
-./opencode2claude.py convert ses_XXXXXXXXXXXX --dry-run
+opencode2claude convert ses_XXXXXXXXXXXX --dry-run
 ```
 
 After converting, resume the session from the project directory it belongs to:
@@ -92,7 +109,7 @@ Control it with `convert ... --wizard {auto,always,never}` (default `auto`:
 runs only for a single, non-dry-run conversion in an interactive terminal).
 
 ```bash
-./opencode2claude.py import-global
+opencode2claude import-global
 ```
 
 Same MCP/agent import wizard, but independent of any session or
@@ -103,7 +120,7 @@ copied **verbatim** — plus any additional agent names known only via
 `oh-my-openagent.json`'s model-routing config (stub fidelity; a real file
 always takes precedence over a stub for the same agent name).
 
-## claude2opencode.py — Claude Code → OpenCode
+## claude2opencode — Claude Code → OpenCode
 
 The mirror image. Converts a Claude Code session (`.jsonl` transcript) into
 a **real OpenCode session** — inserted into `opencode.db` — and imports
@@ -112,14 +129,14 @@ config.
 
 ```bash
 # List every Claude Code session available to convert
-./claude2opencode.py list
+claude2opencode list
 
 # Convert one session (by UUID, searched across ~/.claude/projects/*,
 # or pass a direct .jsonl path)
-./claude2opencode.py convert <session-uuid>
+claude2opencode convert <session-uuid>
 
 # Preview without writing anything
-./claude2opencode.py convert <session-uuid> --dry-run
+claude2opencode convert <session-uuid> --dry-run
 ```
 
 **This one writes to a live application database**, which is a materially
@@ -166,7 +183,7 @@ them), so the backup is the safety net.
   one per directory — a fresh `project` row is only created if none
   exists at all).
 
-## vscode2opencode.py / vscode2claude.py — VS Code (Copilot Chat) → OpenCode/Claude Code
+## vscode2opencode / vscode2claude — VS Code (Copilot Chat) → OpenCode/Claude Code
 
 VS Code (via the GitHub Copilot Chat extension) stores chat sessions as an
 append-only "operation log" — not a simple flat file. The first line is a
@@ -183,11 +200,11 @@ canonical "turns" shape `claude2opencode.py`'s transcript parser produces,
 so both converters build on one shared reader.
 
 ```bash
-./vscode2opencode.py list
-./vscode2opencode.py convert <session-uuid> [--directory DIR] [--dry-run]
+vscode2opencode list
+vscode2opencode convert <session-uuid> [--directory DIR] [--dry-run]
 
-./vscode2claude.py list
-./vscode2claude.py convert <session-uuid> [--directory DIR] [--dry-run]
+vscode2claude list
+vscode2claude convert <session-uuid> [--directory DIR] [--dry-run]
 ```
 
 `--directory` is required (or falls back to the current working directory
@@ -225,14 +242,14 @@ Two things worth knowing:
   resume against a converted session — the API returned a 400 until this
   was fixed.)
 
-## opencode2vscode.py / claude2vscode.py — OpenCode/Claude Code → VS Code (Copilot Chat)
+## opencode2vscode / claude2vscode — OpenCode/Claude Code → VS Code (Copilot Chat)
 
 The reverse of `vscode2opencode.py`/`vscode2claude.py`: writes a **real,
 openable VS Code chat session**.
 
 ```bash
-./opencode2vscode.py convert ses_XXXXXXXXXXXX [--dry-run]
-./claude2vscode.py convert <session-uuid> [--dry-run]
+opencode2vscode convert ses_XXXXXXXXXXXX [--dry-run]
+claude2vscode convert <session-uuid> [--dry-run]
 ```
 
 **This one needs more than a session file.** VS Code's Chat view discovers
@@ -274,6 +291,25 @@ pre-existing real entries, untouched.
 
 ## Requirements
 
-Python 3 standard library only (`sqlite3`, `argparse`, no pip installs).
-Optionally uses `git`/`claude --version`/`opencode --version` if present on
-`PATH`, all with safe fallbacks.
+Python 3.9+, standard library only at runtime (`sqlite3`, `argparse`) —
+`pyproject.toml` declares zero dependencies. Optionally uses
+`git`/`claude --version`/`opencode --version` if present on `PATH`, all
+with safe fallbacks.
+
+## Project layout
+
+```
+harness2go/
+├── pyproject.toml          # build config + console_scripts entry points
+├── src/harness2go/         # the actual package
+│   ├── cli.py              # h2go dispatcher
+│   ├── harness_common.py   # shared JSONC/frontmatter/prompt helpers
+│   ├── vscode_common.py    # shared VS Code session decode/encode
+│   ├── opencode2claude.py
+│   ├── claude2opencode.py
+│   ├── vscode2opencode.py
+│   ├── vscode2claude.py
+│   ├── opencode2vscode.py
+│   └── claude2vscode.py
+└── tests/                  # unittest suite, run against the installed package
+```

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harness2go"
+version = "0.1.0"
+description = "Swiss-army knife for migrating coding-agent harness sessions (and their MCP/agent config) between OpenCode, Claude Code, and VS Code"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+h2go = "harness2go.cli:main"
+opencode2claude = "harness2go.opencode2claude:main"
+claude2opencode = "harness2go.claude2opencode:main"
+vscode2opencode = "harness2go.vscode2opencode:main"
+vscode2claude = "harness2go.vscode2claude:main"
+opencode2vscode = "harness2go.opencode2vscode:main"
+claude2vscode = "harness2go.claude2vscode:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harness2go"]
