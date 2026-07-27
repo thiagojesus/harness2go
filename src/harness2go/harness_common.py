@@ -81,6 +81,10 @@ def has_jsonc_comments(path):
 
 
 def parse_scalar(v):
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        inner = v[1:-1].strip()
+        return [parse_scalar(item.strip()) for item in inner.split(",") if item.strip()] if inner else []
     if v.lower() in ("true", "false"):
         return v.lower() == "true"
     if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
@@ -89,9 +93,11 @@ def parse_scalar(v):
 
 
 def parse_frontmatter(text):
-    """Minimal YAML-ish frontmatter parser: flat `key: value` pairs plus one
-    level of nested `key:\\n  sub: value` maps — enough for typical agent
-    markdown files (Claude Code's or OpenCode's), without a YAML dependency."""
+    """Minimal YAML-ish frontmatter parser: flat `key: value` pairs, a
+    single-line flow sequence (`key: [a, b]`), or one level of nested
+    `key:\\n  sub: value` maps / `key:\\n  - item` lists — enough for
+    typical agent markdown files (Claude Code's, OpenCode's, or VS Code's),
+    without a YAML dependency."""
     if not text.startswith("---"):
         return {}, text
     end = text.find("\n---", 3)
@@ -106,8 +112,16 @@ def parse_frontmatter(text):
         if not line.strip():
             continue
         if line[:1] in (" ", "\t") and current_key is not None:
-            k, sep, v = line.strip().partition(":")
-            if sep and isinstance(data.get(current_key), dict):
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                if not isinstance(data.get(current_key), list):
+                    data[current_key] = []
+                data[current_key].append(parse_scalar(stripped[2:]))
+                continue
+            k, sep, v = stripped.partition(":")
+            if sep:
+                if not isinstance(data.get(current_key), dict):
+                    data[current_key] = {}
                 data[current_key][k.strip()] = parse_scalar(v.strip())
             continue
         k, sep, v = line.partition(":")
@@ -115,7 +129,7 @@ def parse_frontmatter(text):
             continue
         k, v = k.strip(), v.strip()
         if v == "":
-            data[k] = {}
+            data[k] = None  # becomes a dict or list once nested lines (if any) are seen
             current_key = k
         else:
             data[k] = parse_scalar(v)

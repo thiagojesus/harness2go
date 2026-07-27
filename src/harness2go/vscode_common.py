@@ -34,8 +34,35 @@ import time
 import uuid
 from urllib.parse import unquote
 
+from .harness_common import load_jsonc, mask_secret, parse_frontmatter, slugify_name
+
 DEFAULT_VSCODE_USER_DIR = os.path.expanduser("~/Library/Application Support/Code/User")
 CHAT_INDEX_STORAGE_KEY = "chat.ChatSessionStore.index"
+
+# VS Code's own MCP/agent config locations and formats — distinct from the
+# session-storage constants above. Confirmed by reading VS Code's actual
+# source (mcpConfiguration.ts, workspaceDotMcpDiscovery.ts,
+# promptFileLocations.ts in microsoft/vscode):
+#
+#   - Project-scope MCP servers: `.mcp.json` at the workspace root, using
+#     the *exact same* `{"mcpServers": {...}}` shape Claude Code uses for
+#     its own project scope — VS Code's own comment literally says "Uses
+#     the Claude-style format". Already shared with zero conversion needed;
+#     opencode2claude.py/claude2opencode.py's existing project-scope MCP
+#     handling already reads/writes this file.
+#   - Global-scope MCP servers: `<user_dir>/mcp.json`, VS Code's own
+#     `{"servers": {...}}` shape (JSONC — comments/trailing commas allowed).
+#     Per-server fields (stdio: type/command/args/env/cwd; remote:
+#     type/url/headers) match Claude/OpenCode's shape closely enough to
+#     reuse the same entry-building helpers.
+#   - Custom agents: `.agent.md` files (frontmatter: name/description/
+#     model/tools, among others). VS Code natively discovers
+#     `.claude/agents/*.md` (project) and `~/.claude/agents/*.md` (global)
+#     directly — again zero conversion needed for that pairing. Its own
+#     native folders are `.github/agents/*.md` (project) and
+#     `~/.copilot/agents/*.md` (global, note the literal `~` — always
+#     resolved with os.path.expanduser).
+VSCODE_GLOBAL_AGENT_DIR = os.path.expanduser("~/.copilot/agents")
 
 
 def _apply_set(state, path, value):
@@ -539,3 +566,157 @@ def write_vscode_session(directory, turns, user_dir=DEFAULT_VSCODE_USER_DIR, dry
     _merge_index_entry(vscdb_path, index_entry, backup=backup)
 
     return session_id, session_path, scope
+
+
+# ---------------------------------------------------------------------------
+# Global MCP config: <user_dir>/mcp.json, VS Code's own {"servers": {...}}
+# shape. Per-server fields (stdio: type/command/args/env/cwd; remote:
+# type/url/headers) are field-identical to Claude Code's own mcpServers
+# entries, so a Claude-shaped spec can be written here (or read from here)
+# with no translation at all — only OpenCode's shape (command+args merged
+# into one list, "environment" instead of "env", "local"/"remote" instead
+# of "stdio"/"http") needs real conversion.
+# ---------------------------------------------------------------------------
+
+def find_vscode_global_mcp_servers(user_dir=DEFAULT_VSCODE_USER_DIR):
+    path = os.path.join(user_dir, "mcp.json")
+    cfg = load_jsonc(path)
+    return dict(cfg.get("servers") or {})
+
+
+def write_vscode_global_mcp_config(name, entry, user_dir=DEFAULT_VSCODE_USER_DIR):
+    path = os.path.join(user_dir, "mcp.json")
+    if os.path.exists(path):
+        backup_path = f"{path}.bak-{int(time.time())}"
+        shutil.copy2(path, backup_path)
+        print(f"  Backed up {path} -> {backup_path}")
+    cfg = load_jsonc(path)
+    cfg.setdefault("servers", {})[name] = entry
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    return path
+
+
+def opencode_mcp_entry_to_vscode(spec, mask=False):
+    mcp_type = (spec.get("type") or "local").lower()
+    if mcp_type == "remote":
+        entry = {"type": "http", "url": spec.get("url", "")}
+        headers = spec.get("headers") or {}
+        if headers:
+            entry["headers"] = {k: (mask_secret(v) if mask else v) for k, v in headers.items()}
+        return entry
+    command = spec.get("command") or []
+    entry = {"type": "stdio"}
+    if command:
+        entry["command"] = command[0]
+        if len(command) > 1:
+            entry["args"] = list(command[1:])
+    env = spec.get("environment") or {}
+    if env:
+        entry["env"] = {k: (mask_secret(v) if mask else v) for k, v in env.items()}
+    return entry
+
+
+def vscode_mcp_entry_to_opencode(spec, mask=False):
+    mcp_type = spec.get("type", "stdio")
+    if mcp_type in ("http", "sse"):
+        entry = {"type": "remote", "url": spec.get("url", ""), "enabled": True}
+        headers = spec.get("headers") or {}
+        if headers:
+            entry["headers"] = {k: (mask_secret(v) if mask else v) for k, v in headers.items()}
+        return entry
+    command = [spec.get("command", "")] + list(spec.get("args", []) or [])
+    entry = {"type": "local", "command": command, "enabled": True}
+    env = spec.get("env") or {}
+    if env:
+        entry["environment"] = {k: (mask_secret(v) if mask else v) for k, v in env.items()}
+    return entry
+
+
+def build_claude_mcp_add_args_from_spec(name, spec, scope, mask=False):
+    """Build `claude mcp add` argv from a VS Code/Claude-shaped MCP entry
+    (type/command/args/env, or type/url/headers — the two schemas are
+    field-identical). Mirrors opencode2claude.build_mcp_add_args, which
+    expects OpenCode's combined-command-list shape instead."""
+    args = ["claude", "mcp", "add", "--scope", scope]
+    mcp_type = (spec.get("type") or "stdio").lower()
+    if mcp_type in ("http", "sse"):
+        args += ["--transport", "sse" if mcp_type == "sse" else "http"]
+        for k, v in (spec.get("headers") or {}).items():
+            args += ["--header", f"{k}: {mask_secret(v) if mask else v}"]
+        args += [name, spec.get("url", "")]
+    else:
+        for k, v in (spec.get("env") or {}).items():
+            args += ["-e", f"{k}={mask_secret(v) if mask else v}"]
+        command = [spec.get("command", "")] + list(spec.get("args", []) or [])
+        args += [name, "--"] + command
+    return args
+
+
+# ---------------------------------------------------------------------------
+# Custom agents: VS Code's own `.agent.md` files (frontmatter: name/
+# description/model/tools, among other VS-Code-specific fields we don't
+# need). Project scope: .github/agents/*.md. Global scope: ~/.copilot/agents/*.md.
+# (.claude/agents/*.md is natively read by VS Code directly — no conversion
+# needed for that pairing at all, so there's no vscode-target writer for it.)
+# ---------------------------------------------------------------------------
+
+def build_vscode_agent_frontmatter(source_frontmatter, slug):
+    lines = [f"name: {source_frontmatter.get('name') or slug}"]
+    description = source_frontmatter.get("description") or "Imported agent."
+    lines.append(f"description: {description}")
+    model = source_frontmatter.get("model")
+    if isinstance(model, list) and model:
+        model = model[0]
+    if model:
+        lines.append(f"model: {model}")
+    tools = source_frontmatter.get("tools")
+    tool_names = []
+    if isinstance(tools, dict):
+        tool_names = [k for k, v in tools.items() if v]
+    elif isinstance(tools, str):
+        tool_names = [t.strip() for t in tools.split(",") if t.strip()]
+    elif isinstance(tools, list):
+        tool_names = [str(t) for t in tools]
+    if tool_names:
+        lines.append(f"tools: [{', '.join(tool_names)}]")
+    return lines
+
+
+def write_vscode_agent_file(target_dir, slug, source_frontmatter, body):
+    os.makedirs(target_dir, exist_ok=True)
+    path = os.path.join(target_dir, f"{slug}.agent.md")
+    fm_lines = build_vscode_agent_frontmatter(source_frontmatter, slug)
+    with open(path, "w") as f:
+        f.write("---\n" + "\n".join(fm_lines) + "\n---\n\n" + body)
+    return path
+
+
+def write_claude_agent_file(target_dir, slug, source_frontmatter, body):
+    """Writes a Claude Code-style agent file (flat frontmatter:
+    description/model/tools-as-comma-list) from another harness's agent
+    frontmatter — used when the source is VS Code's own .agent.md, since
+    .claude/agents files themselves need no conversion at all."""
+    os.makedirs(target_dir, exist_ok=True)
+    path = os.path.join(target_dir, f"{slug}.md")
+    lines = [f"name: {slug}"]
+    description = source_frontmatter.get("description") or "Imported agent."
+    lines.append(f"description: {description}")
+    model = source_frontmatter.get("model")
+    if isinstance(model, list) and model:
+        model = model[0]
+    if model:
+        lines.append(f"model: {model}")
+    tools = source_frontmatter.get("tools")
+    tool_names = []
+    if isinstance(tools, list):
+        tool_names = [str(t) for t in tools]
+    elif isinstance(tools, str):
+        tool_names = [t.strip() for t in tools.split(",") if t.strip()]
+    if tool_names:
+        lines.append(f"tools: {', '.join(tool_names)}")
+    with open(path, "w") as f:
+        f.write("---\n" + "\n".join(lines) + "\n---\n\n" + body)
+    return path

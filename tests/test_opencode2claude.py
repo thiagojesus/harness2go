@@ -132,6 +132,24 @@ class ParseFrontmatter(unittest.TestCase):
         self.assertEqual(fm, {})
         self.assertEqual(body, text)
 
+    def test_flow_sequence_list(self):
+        # Regression: a real VS Code .agent.md using `tools: [a, b]` used to
+        # be parsed as the literal string "[a, b]" (then mis-split on
+        # commas downstream into "[a"/"b]"), not a list.
+        text = "---\ndescription: x\ntools: [read, grep]\n---\nBody\n"
+        fm, _ = m.parse_frontmatter(text)
+        self.assertEqual(fm["tools"], ["read", "grep"])
+
+    def test_dash_list(self):
+        text = "---\ndescription: x\ntools:\n  - read\n  - grep\n---\nBody\n"
+        fm, _ = m.parse_frontmatter(text)
+        self.assertEqual(fm["tools"], ["read", "grep"])
+
+    def test_empty_flow_sequence(self):
+        text = "---\ntools: []\n---\nBody\n"
+        fm, _ = m.parse_frontmatter(text)
+        self.assertEqual(fm["tools"], [])
+
 
 class FindGlobalAgentDefinitions(unittest.TestCase):
     def test_real_file_takes_precedence_over_oh_my_openagent_stub(self):

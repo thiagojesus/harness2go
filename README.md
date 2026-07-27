@@ -302,6 +302,50 @@ one) — replaying the written file reproduced the original conversation
 content, and the index entry showed up correctly alongside the
 pre-existing real entries, untouched.
 
+## MCP servers and agents, without a session — including VS Code
+
+Every direction supports `import-global`, so you can bring over MCP
+servers and custom agents without converting an actual session:
+
+```bash
+opencode2claude import-global   # opencode2vscode, claude2vscode, vscode2opencode, vscode2claude too
+```
+
+Before building the VS Code side of this, it's worth knowing that **some
+pairings already work with zero conversion**, because VS Code natively
+reads certain other-harness config directly (confirmed by reading VS
+Code's own source):
+
+- **Claude Code agents ↔ VS Code**: VS Code discovers `.claude/agents/*.md`
+  (project) and `~/.claude/agents/*.md` (global) directly — it's hardcoded
+  into VS Code's own agent-discovery list. If a Claude Code agent already
+  exists, VS Code already sees it. `claude2vscode import-global` reports
+  this instead of pretending there's something to convert.
+- **Claude Code project-scope MCP ↔ VS Code**: both read `.mcp.json` at the
+  project root using the identical `{"mcpServers": {...}}` shape — VS
+  Code's own source comment literally says "Uses the Claude-style format".
+
+What's genuinely new, because no such overlap exists:
+
+- **OpenCode ↔ VS Code**, MCP and agents, both scopes. Different formats
+  and locations entirely (OpenCode's `opencode.jsonc` "mcp" key /
+  `~/.config/opencode/agent/*.md` vs. VS Code's own schemas below).
+- **VS Code's own *global* MCP config**, `<VS Code user dir>/mcp.json`
+  (JSONC, `{"servers": {...}}`) ↔ OpenCode's global config and Claude
+  Code's global config (`~/.claude.json` "mcpServers"). Claude's shape is
+  field-identical to VS Code's own (`type`/`command`/`args`/`env`, or
+  `type`/`url`/`headers`), so that pairing is close to a straight copy;
+  OpenCode's shape (command+args merged into one list, `environment`
+  instead of `env`) needs real translation.
+- **VS Code's own custom agents**, `.github/agents/*.md` (project) /
+  `~/.copilot/agents/*.md` (global), `.agent.md` frontmatter
+  (`name`/`description`/`model`/`tools`) — relevant whenever the source or
+  target doesn't already overlap with Claude's `.claude/agents` convention.
+
+`vscode2claude import-global` reuses the real `claude mcp add --scope user`
+CLI (like `opencode2claude` already does) rather than hand-writing
+`~/.claude.json`.
+
 ## Requirements
 
 Python 3.9+, standard library only at runtime (`sqlite3`, `argparse`) —
