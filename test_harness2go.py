@@ -37,6 +37,18 @@ class Dispatcher(unittest.TestCase):
         result = self._run(["claude2opencode", "list", "--claude-projects", "/nonexistent/projects"])
         self.assertEqual(result.returncode, 0)
 
+    def test_dispatches_to_vscode2opencode(self):
+        result = self._run(["vscode2opencode", "--help"])
+        self.assertEqual(result.returncode, 0)
+
+    def test_dispatches_to_vscode2claude(self):
+        result = self._run(["vscode2claude", "--help"])
+        self.assertEqual(result.returncode, 0)
+
+    def test_vscode_list_works_without_any_real_vscode_install(self):
+        result = self._run(["vscode2opencode", "list", "--vscode-user-dir", "/nonexistent/vscode"])
+        self.assertEqual(result.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

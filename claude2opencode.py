@@ -80,13 +80,17 @@ def new_opencode_id(prefix):
     return f"{prefix}_{uuid.uuid4().hex[:24]}"
 
 
-def to_epoch_ms(iso_str, fallback=None):
-    if not iso_str:
+def to_epoch_ms(timestamp, fallback=None):
+    """Accepts either an ISO-8601 string (Claude Code's transcript format)
+    or an epoch-millisecond int/float (VS Code's chat session format)."""
+    if not timestamp:
         return fallback if fallback is not None else int(time.time() * 1000)
+    if isinstance(timestamp, (int, float)):
+        return int(timestamp)
     try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         return int(dt.timestamp() * 1000)
-    except ValueError:
+    except (ValueError, AttributeError):
         return fallback if fallback is not None else int(time.time() * 1000)
 
 
@@ -300,8 +304,21 @@ def reverse_stop_reason(stop_reason):
 
 
 def reverse_map_model(model):
+    """Claude Code transcripts only ever carry bare Anthropic model ids, but
+    this is also reused by vscode2opencode.py, whose sessions carry
+    provider/model strings (e.g. "copilot/auto") or bare non-Anthropic ids
+    (e.g. "gpt-5-mini") — so this makes a best-effort provider guess rather
+    than assuming Anthropic unconditionally."""
     if not model or model == "<synthetic>":
         return "unknown", "anthropic"
+    if "/" in model:
+        provider, _, model_id = model.partition("/")
+        return model_id, provider
+    lowered = model.lower()
+    if any(tag in lowered for tag in ("gpt", "o1", "o3", "o4")):
+        return model, "openai"
+    if "gemini" in lowered:
+        return model, "google"
     return model, "anthropic"
 
 
